@@ -5,7 +5,7 @@ import {
   SWATCHBOOK_STYLE_ELEMENT_ID,
 } from '@unpunnyfuns/swatchbook-core/style-element';
 import { tupleToName } from '@unpunnyfuns/swatchbook-core/themes';
-import type { Axis, Cells, JointOverrides, TokenMap } from '@unpunnyfuns/swatchbook-core';
+import type { Axis, Cells, JointOverrides } from '@unpunnyfuns/swatchbook-core';
 import { useEffect, useMemo } from 'react';
 import type { VirtualTokenListingShape, VirtualVarianceByPathShape } from '#/contexts.ts';
 import { useActiveAxes, useActivePermutation, useOptionalSwatchbookData } from '#/contexts.ts';
@@ -82,7 +82,7 @@ function makeResolveAt(snapshot: {
     jointOverrides,
     defaults,
   );
-  return (tuple) => resolver(tuple) as TokenMap as ResolvedTokens;
+  return (tuple) => resolver(tuple);
 }
 
 /**
