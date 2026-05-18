@@ -8,7 +8,7 @@ import { tupleToName } from '@unpunnyfuns/swatchbook-core/themes';
 import type { Axis, Cells, JointOverrides } from '@unpunnyfuns/swatchbook-core';
 import { useEffect, useMemo } from 'react';
 import type { VirtualTokenListingShape, VirtualVarianceByPathShape } from '#/contexts.ts';
-import { useActiveAxes, useActivePermutation, useOptionalSwatchbookData } from '#/contexts.ts';
+import { useActiveAxes, useActiveTheme, useOptionalSwatchbookData } from '#/contexts.ts';
 import { type ColorFormat, formatColor, type FormatColorResult } from '#/format-color.ts';
 import { useChannelGlobals } from '#/internal/channel-globals.ts';
 import { useTokenSnapshot } from '#/internal/channel-tokens.ts';
@@ -17,7 +17,7 @@ import type { ProjectSnapshot, VirtualAxis, VirtualDiagnostic, VirtualToken } fr
 type ResolvedTokens = Record<string, VirtualToken>;
 
 export interface ProjectData {
-  activePermutation: string;
+  activeTheme: string;
   activeAxes: Record<string, string>;
   axes: readonly VirtualAxis[];
   resolved: ResolvedTokens;
@@ -47,7 +47,7 @@ export interface ProjectData {
    * matching the form `permutationID` produces server-side. Used by
    * the AxisVariance grid for `data-<prefix>-theme` attribution.
    */
-  permutationNameForTuple: (tuple: Record<string, string>) => string | undefined;
+  themeNameForTuple: (tuple: Record<string, string>) => string | undefined;
 }
 
 function ensureStylesheet(css: string): void {
@@ -135,7 +135,7 @@ export function useProject(): ProjectData {
   const jointOverrides = snapshot?.jointOverrides;
   const dataDefaultTuple = snapshot?.defaultTuple;
   const activeAxes = snapshot?.activeAxes;
-  const activePermutation = snapshot?.activePermutation;
+  const activeTheme = snapshot?.activeTheme;
   const diagnostics = snapshot?.diagnostics;
   const cssVarPrefix = snapshot?.cssVarPrefix;
   const listing = snapshot?.listing;
@@ -146,7 +146,7 @@ export function useProject(): ProjectData {
     // The deps below are deliberately the stable inner fields rather
     // than `snapshot` itself; see the long block comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [axes, cells, jointOverrides, dataDefaultTuple, activePermutation]);
+  }, [axes, cells, jointOverrides, dataDefaultTuple, activeTheme]);
   // Memoize the returned ProjectData against the same stable inner
   // fields — without this, blocks `useMemo([project, …])` calls
   // invalidate every render (the function returns a fresh object
@@ -155,7 +155,7 @@ export function useProject(): ProjectData {
   const providerData = useMemo<ProjectData | null>(() => {
     if (!snapshot || !resolveAt || !axes || !activeAxes) return null;
     return {
-      activePermutation: activePermutation ?? '',
+      activeTheme: activeTheme ?? '',
       activeAxes: activeAxes as Record<string, string>,
       axes,
       resolved: resolveAt(activeAxes as Record<string, string>),
@@ -164,7 +164,7 @@ export function useProject(): ProjectData {
       listing: listing ?? {},
       varianceByPath: varianceByPath ?? {},
       resolveAt,
-      permutationNameForTuple: (tuple) => tupleToName(axes, tuple),
+      themeNameForTuple: (tuple) => tupleToName(axes, tuple),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -174,7 +174,7 @@ export function useProject(): ProjectData {
     cells,
     jointOverrides,
     dataDefaultTuple,
-    activePermutation,
+    activeTheme,
     activeAxes,
     diagnostics,
     cssVarPrefix,
@@ -186,7 +186,7 @@ export function useProject(): ProjectData {
 }
 
 function useVirtualModuleFallback(enabled: boolean): ProjectData {
-  const contextPermutation = useActivePermutation();
+  const contextPermutation = useActiveTheme();
   const contextAxes = useActiveAxes();
   const channelGlobals = useChannelGlobals();
   /**
@@ -214,7 +214,7 @@ function useVirtualModuleFallback(enabled: boolean): ProjectData {
     return hasContextAxes ? { ...contextAxes } : (channelGlobals.axes ?? defaultTuple(tokens.axes));
   }, [contextAxes, channelGlobals.axes, tokens.axes]);
 
-  const activePermutation = contextPermutation || tupleToName(tokens.axes, activeAxes);
+  const activeTheme = contextPermutation || tupleToName(tokens.axes, activeAxes);
 
   // `buildResolveAt` returns a closure that memoizes on the canonical
   // tuple key, so wrapping the call in another `useMemo` would be
@@ -237,7 +237,7 @@ function useVirtualModuleFallback(enabled: boolean): ProjectData {
   // per render would defeat `useMemo([project, …])` in every block.
   return useMemo<ProjectData>(
     () => ({
-      activePermutation,
+      activeTheme,
       activeAxes,
       axes: tokens.axes,
       resolved: resolveAt(activeAxes),
@@ -246,10 +246,10 @@ function useVirtualModuleFallback(enabled: boolean): ProjectData {
       listing: tokens.listing,
       varianceByPath: tokens.varianceByPath,
       resolveAt,
-      permutationNameForTuple: (tuple) => tupleToName(tokens.axes, tuple),
+      themeNameForTuple: (tuple) => tupleToName(tokens.axes, tuple),
     }),
     [
-      activePermutation,
+      activeTheme,
       activeAxes,
       tokens.axes,
       tokens.diagnostics,
