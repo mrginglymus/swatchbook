@@ -1,9 +1,28 @@
 import type { Resolver } from '@terrazzo/parser';
+import { buildAliasGraph, isAxisComboConnected } from '#/alias-graph.ts';
 import { buildResolveAt } from '#/resolve-at.ts';
 import { canonicalKey } from '#/tuple-key.ts';
 import type { TupleKey } from '#/tuple-key.ts';
 import type { Axis, Cells, JointOverride, JointOverrides, TokenMap } from '#/types.ts';
 import { valueKey } from '#/value-key.ts';
+
+/**
+ * Optional inputs to `probeJointOverrides`. All fields are advanced
+ * use cases — the default-empty options object reproduces standard
+ * behaviour, which `loadProject` relies on.
+ *
+ * - `maxArity` caps the arity sweep. Defaults to `axes.length`.
+ *   Useful as an escape hatch on projects whose alias graph has a
+ *   single fully-connected component at high axis counts — graph
+ *   culling can't help there, and the combinatorial sweep still
+ *   blows up. Setting `maxArity: 2` restricts to pair-only probing.
+ *   Empirically, joint divergences observed in real-world configs
+ *   are pair-shaped; arity-3+ probes are conservative coverage
+ *   rather than load-bearing correctness.
+ */
+export interface ProbeOptions {
+  maxArity?: number;
+}
 
 /**
  * Two-pass joint-probe output:
@@ -25,8 +44,9 @@ export interface JointProbeResult {
 }
 
 /**
- * Probe every pair of `(axis, non-default-context)` combinations via
- * `resolver.apply` and derive two distinct signals from each probe:
+ * Probe `(axis-combo, context-product)` combinations via `resolver.apply`
+ * (capped by `options.maxArity`, default = `axes.length`) and derive two
+ * distinct signals from each probe:
  *
  *   1. `overrides` — records the cartesian-correct values for tokens
  *      whose joint value differs from cells composition. Drives
@@ -45,8 +65,13 @@ export interface JointProbeResult {
  * dark, Dark+BrandA → white), so the touching signal flags brand
  * even though no override is needed.
  *
- * Pair-only at this stage. Triple-and-higher joint variance is a
- * documented limitation; the algorithm extends naturally to arity N.
+ * Probe iterates arity 2..min(`maxArity`, axes.length). At each arity,
+ * the alias graph (built internally from the resolver source + baseline)
+ * is consulted to skip orthogonal combinations — axis combos whose
+ * reach sets don't overlap can't produce a joint divergence, so we
+ * spend zero `resolver.apply` on them. Configs with concern-disjoint
+ * axes see substantial savings; configs whose axes all share paths
+ * see no savings but no regression.
  *
  * Resolver-less projects (layered / plain-parse) return empty
  * collections — no resolver to probe with.
@@ -56,10 +81,12 @@ export function probeJointOverrides(
   cells: Cells,
   defaultTuple: Readonly<Record<string, string>>,
   resolver: Resolver | undefined,
+  options: ProbeOptions = {},
 ): JointProbeResult {
   if (!resolver || axes.length < 2) {
     return { overrides: [], jointTouching: new Map() };
   }
+  const maxArity = Math.min(options.maxArity ?? axes.length, axes.length);
 
   // Internal Map keyed on canonicalKey for dedupe across arity passes.
   // Materialized to the public array shape on return so the wire
@@ -72,6 +99,21 @@ export function probeJointOverrides(
   const firstAxis = axes[0];
   const baseline: TokenMap = (firstAxis && cells[firstAxis.name]?.[firstAxis.default]) ?? {};
 
+  // Build the alias-reachability graph from the resolver's parsed
+  // source + baseline token map. The graph identifies which axis
+  // combinations could possibly produce joint divergences; the rest
+  // we skip without burning a `resolver.apply` on them. See
+  // alias-graph.ts for the design rationale; the data sources are
+  // load-bearing (Phase 0 finding: must read pre-strip writes from
+  // resolver source, not delta cells).
+  //
+  // Falls back to brute-force when the resolver lacks `.source`
+  // (test mocks). Production `loadResolver` always populates it.
+  const modifierSource = resolver.source?.modifiers;
+  const aliasGraph = modifierSource
+    ? buildAliasGraph({ axes, resolverModifiers: modifierSource, baseline })
+    : undefined;
+
   const markJointTouching = (path: string, axisName: string): void => {
     let set = jointTouching.get(path);
     if (!set) {
@@ -81,15 +123,20 @@ export function probeJointOverrides(
     set.add(axisName);
   };
 
-  // Iterate arity 2..axes.length. At each arity, build a composer
-  // over `cells + accumulated overrides` so arity-N probes see the
+  // Iterate arity 2..maxArity. At each arity, build a composer over
+  // `cells + accumulated overrides` so arity-N probes see the
   // (N-1)-level corrections already recorded — higher-arity
   // divergences get recorded only when they're not already implied
   // by a lower-arity override.
-  for (let arity = 2; arity <= axes.length; arity++) {
+  for (let arity = 2; arity <= maxArity; arity++) {
     const composer = buildResolveAt(axes, cells, [...overrides.entries()], defaultTuple);
 
     for (const axisCombo of axisCombinations(axes, arity)) {
+      // Graph cull: every axis must have an in-combo connection, or
+      // the combo is provably orthogonal and can't contribute a
+      // joint divergence. Skipped entirely on resolvers without
+      // source data (test mocks); production flow always has it.
+      if (aliasGraph && !isAxisComboConnected(aliasGraph, axisCombo)) continue;
       for (const partialTuple of contextProducts(axisCombo)) {
         const fullTuple = { ...defaultTuple, ...partialTuple };
         const cartesian = resolver.apply(fullTuple);
