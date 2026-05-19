@@ -2,7 +2,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { loadProject } from '#/load.ts';
-import type { Config, Project } from '#/types.ts';
+import type { Axis, Config, Project, SwatchbookToken, TokenMap } from '#/types.ts';
+import { permutationID } from '#/types.ts';
+import { buildTokenGraphFromLayered } from '#/token-graph/build.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureCwd = resolve(here, 'fixtures/layered');
@@ -57,14 +59,14 @@ describe('loadProject — layered axes', () => {
     ]);
   });
 
-  it('cells per (axis, context) cover every singleton tuple', () => {
+  it('graph axisContexts cover every (axis, context) pair', () => {
     // Singleton enumeration: default tuple + Σ(contexts - 1) per-axis
     // non-default singletons. For mode (Light, Dark) × brand (Default,
     // Brand A) that's 1 + 1 + 1 = 3 singletons; the joint Dark · Brand A
-    // tuple is not materialized — composeAt produces it from per-axis cells.
+    // tuple is not materialized — resolveAt produces it from the graph.
     for (const axis of project.axes) {
       for (const ctx of axis.contexts) {
-        expect(project.cells[axis.name]?.[ctx]).toBeDefined();
+        expect(project.tokenGraph.axisContexts[axis.name]).toContain(ctx);
       }
     }
   });
@@ -110,10 +112,161 @@ describe('loadProject — layered axes', () => {
       ],
     };
     const p = await loadProject(config, fixtureCwd);
-    expect(Object.keys(p.cells['brand'] ?? {}).toSorted()).toEqual(['Brand A', 'Default']);
+    expect((p.tokenGraph.axisContexts['brand'] ?? []).toSorted()).toEqual(['Brand A', 'Default']);
     expect(p.defaultTokens['color.accent']?.$value).toMatchObject({
       components: [0.1, 0.3, 0.9],
     });
   });
+
+  it('tokenGraph has populated nodes for layered projects', () => {
+    expect(Object.keys(project.tokenGraph.nodes).length).toBeGreaterThan(0);
+  });
+
+  it('tokenGraph baseline node has correct value for a known path', () => {
+    const node = project.tokenGraph.nodes['color.surface'];
+    expect(node).toBeDefined();
+    expect(node?.baselineValue.$value).toMatchObject({ components: [1, 1, 1] });
+  });
+
+  it('tokenGraph write captures mode=Dark overlay for color.surface', () => {
+    const node = project.tokenGraph.nodes['color.surface'];
+    expect(node?.writes['mode']?.['Dark']).toBeDefined();
+    const write = node?.writes['mode']?.['Dark'];
+    expect(write?.kind).toBe('alias');
+    if (write?.kind === 'alias') {
+      expect(write.target).toBe('color.black');
+    }
+  });
+
+  it('tokenGraph write captures brand=Brand A overlay for color.accent', () => {
+    const node = project.tokenGraph.nodes['color.accent'];
+    expect(node?.writes['brand']?.['Brand A']).toBeDefined();
+    const write = node?.writes['brand']?.['Brand A'];
+    expect(write?.kind).toBe('alias');
+    if (write?.kind === 'alias') {
+      expect(write.target).toBe('color.red');
+    }
+  });
+
+  it('tokenGraph affectedBy reflects mode axis for color.surface', () => {
+    const node = project.tokenGraph.nodes['color.surface'];
+    expect(node?.affectedBy).toContain('mode');
+  });
+
+  it('resolveAt returns correct value for Dark mode via graph (color.surface)', () => {
+    const dark = project.resolveAt({ mode: 'Dark', brand: 'Default' });
+    expect(dark['color.surface']?.$value).toMatchObject({ components: [0, 0, 0] });
+  });
+
+  it('resolveAt returns correct value for Brand A via graph (color.accent)', () => {
+    const brand = project.resolveAt({ mode: 'Light', brand: 'Brand A' });
+    expect(brand['color.accent']?.$value).toMatchObject({ components: [0.9, 0.2, 0.2] });
+  });
+
+  it('resolveAt composes multi-axis tuple via graph (Dark + Brand A)', () => {
+    const tokens = project.resolveAt({ mode: 'Dark', brand: 'Brand A' });
+    expect(tokens['color.surface']?.$value).toMatchObject({ components: [0, 0, 0] });
+    expect(tokens['color.accent']?.$value).toMatchObject({ components: [0.9, 0.2, 0.2] });
+  });
 });
 
+describe('loadProject — layered axes with disabledAxes', () => {
+  // Regression for the disabledAxes + layered key mismatch: when brand is
+  // disabled, applyDisabledAxes must re-key filteredResolved to the
+  // filtered-axes-only shape so buildTokenGraphFromLayered can look up the
+  // Dark singleton by permutationID({ mode: 'Dark' }) = "Dark" rather than
+  // the original "Dark · Default" multi-axis key.
+  let project: Project;
+  beforeAll(async () => {
+    project = await loadProject(layeredConfig({ disabledAxes: ['brand'] }), fixtureCwd);
+  }, 30_000);
+
+  it('brand axis is absent from project.axes after disabledAxes filter', () => {
+    expect(project.axes.map((a) => a.name)).toEqual(['mode']);
+    expect(project.disabledAxes).toEqual(['brand']);
+  });
+
+  it('Dark mode writes are correctly extracted — color.surface resolves to black', () => {
+    const dark = project.resolveAt({ mode: 'Dark' });
+    expect(dark['color.surface']?.$value).toMatchObject({ components: [0, 0, 0] });
+  });
+
+  it('default tuple resolves to the Light baseline', () => {
+    expect(project.defaultTokens['color.surface']?.$value).toMatchObject({ components: [1, 1, 1] });
+  });
+});
+
+describe('buildTokenGraphFromLayered — alias-target switch with coincident resolved values', () => {
+  // Regression for issue #992: when an overlay switches color.x from
+  // alias(color.a) to alias(color.b) but both color.a and color.b happen to
+  // resolve to the same value at that singleton, a value-only diff would skip
+  // the write entirely. At a joint tuple where color.a diverges from color.b,
+  // the walker would then use the wrong (baseline) alias target.
+
+  it('records alias-target switch even when both targets resolve to the same singleton value', () => {
+    const axes: readonly Axis[] = [
+      { name: 'mode', contexts: ['Light', 'Dark'], default: 'Light', source: 'layered' },
+    ];
+    const defaultTuple = { mode: 'Light' };
+
+    const baseline: TokenMap = {
+      'color.a': { $type: 'color', $value: '#abc' } as SwatchbookToken,
+      'color.b': { $type: 'color', $value: '#abc' } as SwatchbookToken,
+      'color.x': { $type: 'color', $value: '#abc', aliasOf: 'color.a' } as SwatchbookToken,
+    };
+
+    // Dark singleton: color.x switches its alias target from color.a to
+    // color.b. Both still resolve to '#abc' at this singleton, so a
+    // value-only equality check would incorrectly skip the write.
+    const darkResolved: TokenMap = {
+      'color.a': { $type: 'color', $value: '#abc' } as SwatchbookToken,
+      'color.b': { $type: 'color', $value: '#abc' } as SwatchbookToken,
+      'color.x': { $type: 'color', $value: '#abc', aliasOf: 'color.b' } as SwatchbookToken,
+    };
+
+    const darkId = permutationID({ mode: 'Dark' });
+    const { graph } = buildTokenGraphFromLayered(
+      axes,
+      baseline,
+      { [darkId]: darkResolved },
+      defaultTuple,
+    );
+
+    const xWrite = graph.nodes['color.x']?.writes?.['mode']?.['Dark'];
+    expect(xWrite).toBeDefined();
+    expect(xWrite?.kind).toBe('alias');
+    if (xWrite?.kind === 'alias') {
+      expect(xWrite.target).toBe('color.b');
+    }
+  });
+
+  it('does not record a write when the alias target is unchanged even if the resolved value coincides', () => {
+    const axes: readonly Axis[] = [
+      { name: 'mode', contexts: ['Light', 'Dark'], default: 'Light', source: 'layered' },
+    ];
+    const defaultTuple = { mode: 'Light' };
+
+    const baseline: TokenMap = {
+      'color.a': { $type: 'color', $value: '#abc' } as SwatchbookToken,
+      'color.x': { $type: 'color', $value: '#abc', aliasOf: 'color.a' } as SwatchbookToken,
+    };
+
+    // Dark singleton: color.x still aliases color.a and resolves to '#abc' —
+    // truly a no-op; the write should be omitted.
+    const darkResolved: TokenMap = {
+      'color.a': { $type: 'color', $value: '#abc' } as SwatchbookToken,
+      'color.x': { $type: 'color', $value: '#abc', aliasOf: 'color.a' } as SwatchbookToken,
+    };
+
+    const darkId = permutationID({ mode: 'Dark' });
+    const { graph } = buildTokenGraphFromLayered(
+      axes,
+      baseline,
+      { [darkId]: darkResolved },
+      defaultTuple,
+    );
+
+    const xWrite = graph.nodes['color.x']?.writes?.['mode']?.['Dark'];
+    expect(xWrite).toBeUndefined();
+  });
+});

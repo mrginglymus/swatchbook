@@ -2,24 +2,20 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SwatchbookProvider, ColorPalette } from '#/index.ts';
 import type { ProjectSnapshot } from '#/index.ts';
+import { makeResolveAt } from './_snapshot-helpers.ts';
 
 function makeSnapshot(): ProjectSnapshot {
-  return {
+  const tokens = {
+    'color.bg': { $type: 'color', $value: { hex: '#fff' } },
+    'color.fg': { $type: 'color', $value: { hex: '#111' } },
+    'color.palette.blue.500': { $type: 'color', $value: { hex: '#3b82f6' } },
+    'color.palette.red.500': { $type: 'color', $value: { hex: '#ef4444' } },
+    'radius.sm': { $type: 'dimension', $value: { value: 4, unit: 'px' } },
+  };
+  const snap: ProjectSnapshot = {
     axes: [{ name: 'theme', contexts: ['Light'], default: 'Light', source: 'synthetic' }],
     disabledAxes: [],
     presets: [],
-    cells: {
-      theme: {
-        Light: {
-          'color.bg': { $type: 'color', $value: { hex: '#fff' } },
-          'color.fg': { $type: 'color', $value: { hex: '#111' } },
-          'color.palette.blue.500': { $type: 'color', $value: { hex: '#3b82f6' } },
-          'color.palette.red.500': { $type: 'color', $value: { hex: '#ef4444' } },
-          'radius.sm': { $type: 'dimension', $value: { value: 4, unit: 'px' } },
-        },
-      },
-    },
-    jointOverrides: [],
     defaultTuple: { theme: 'Light' },
     activeTheme: 'Light',
     activeAxes: { theme: 'Light' },
@@ -27,6 +23,8 @@ function makeSnapshot(): ProjectSnapshot {
     diagnostics: [],
     css: '',
   };
+  snap.resolveAt = makeResolveAt(tokens);
+  return snap;
 }
 
 describe('ColorPalette', () => {

@@ -10,14 +10,13 @@ import { vi } from 'vitest';
 import { DetailOverlay } from '#/internal/DetailOverlay.tsx';
 import { SwatchbookProvider } from '#/provider.tsx';
 import type { ProjectSnapshot } from '#/contexts.ts';
+import { makeResolveAt } from './_snapshot-helpers.ts';
 
 export function emptySnapshot(): ProjectSnapshot {
-  return {
+  const snap: ProjectSnapshot = {
     axes: [],
     disabledAxes: [],
     presets: [],
-    cells: {},
-    jointOverrides: [],
     defaultTuple: {},
     activeTheme: '',
     activeAxes: {},
@@ -25,6 +24,8 @@ export function emptySnapshot(): ProjectSnapshot {
     diagnostics: [],
     css: '',
   };
+  snap.resolveAt = makeResolveAt({});
+  return snap;
 }
 
 export function renderOverlay(onClose = vi.fn()): { onClose: ReturnType<typeof vi.fn> } {

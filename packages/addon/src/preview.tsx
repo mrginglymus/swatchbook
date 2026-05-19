@@ -1,10 +1,6 @@
 /// <reference types="vite/client" />
-import { buildResolveAt } from '@unpunnyfuns/swatchbook-core/resolve-at';
-import type {
-  Axis as CoreAxis,
-  Cells as CoreCells,
-  JointOverrides,
-} from '@unpunnyfuns/swatchbook-core';
+import { resolveAllAt } from '@unpunnyfuns/swatchbook-core/graph';
+import type { TokenMap } from '@unpunnyfuns/swatchbook-core';
 import type { Decorator, Preview } from '@storybook/react-vite';
 import type { CSSProperties } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -18,16 +14,14 @@ import { tupleToName } from '@unpunnyfuns/swatchbook-core/themes';
 import 'virtual:swatchbook/integration-side-effects';
 import {
   axes as virtualAxes,
-  cells as virtualCells,
   css,
   cssVarPrefix,
   defaultTuple as virtualDefaultTuple,
   diagnostics,
   disabledAxes as virtualDisabledAxes,
-  jointOverrides as virtualJointOverrides,
   listing as virtualListing,
   presets as virtualPresets,
-  varianceByPath as virtualVarianceByPath,
+  tokenGraph as virtualTokenGraph,
 } from 'virtual:swatchbook/tokens';
 import {
   AxesContext,
@@ -145,7 +139,7 @@ function setRootAxes(tuple: Readonly<Record<string, string>>): void {
 }
 
 /**
- * Subset of an INIT_EVENT-shaped object the manager bundle needs. The 9
+ * Subset of an INIT_EVENT-shaped object the manager bundle needs. The
  * fields are the union of what the toolbar and panel read; named so
  * `broadcastInit` (module-level virtual exports) and the HMR re-emit
  * (`payload`-shaped) compose the same payload from the same shape.
@@ -156,9 +150,6 @@ interface InitFieldsSource {
   presets: typeof virtualPresets;
   diagnostics: typeof diagnostics;
   cssVarPrefix: string;
-  cells: typeof virtualCells;
-  jointOverrides: typeof virtualJointOverrides;
-  varianceByPath: typeof virtualVarianceByPath;
   defaultTuple: typeof virtualDefaultTuple;
 }
 
@@ -169,9 +160,6 @@ function pickInitFields(source: InitFieldsSource): InitFieldsSource {
     presets: source.presets,
     diagnostics: source.diagnostics,
     cssVarPrefix: source.cssVarPrefix,
-    cells: source.cells,
-    jointOverrides: source.jointOverrides,
-    varianceByPath: source.varianceByPath,
     defaultTuple: source.defaultTuple,
   };
 }
@@ -191,9 +179,6 @@ function broadcastInit(): void {
       presets: virtualPresets,
       diagnostics,
       cssVarPrefix,
-      cells: virtualCells,
-      jointOverrides: virtualJointOverrides,
-      varianceByPath: virtualVarianceByPath,
       defaultTuple: virtualDefaultTuple,
     }),
   );
@@ -277,18 +262,14 @@ function resolveColorFormat(raw: SwatchbookGlobals[typeof COLOR_FORMAT_GLOBAL_KE
 
 /**
  * Single shared `resolveAt` instance for the lifetime of the preview
- * iframe. The inputs (`virtualAxes`, `virtualCells`, …) are all
- * module-level virtual-module exports with stable identity, so this
- * never needs to rebuild; downstream `ProjectSnapshot` consumers can
- * key memos on the snapshot wrapper without worrying about
- * `resolveAt` churning when Storybook recreates `context.globals`.
+ * iframe. `virtualTokenGraph` is a module-level virtual-module export
+ * with stable identity, so this closure never needs to rebuild;
+ * downstream `ProjectSnapshot` consumers can key memos on the snapshot
+ * wrapper without worrying about `resolveAt` churning when Storybook
+ * recreates `context.globals`.
  */
-const previewResolveAt = buildResolveAt(
-  virtualAxes as readonly CoreAxis[],
-  virtualCells as CoreCells,
-  virtualJointOverrides as JointOverrides,
-  virtualDefaultTuple,
-);
+const previewResolveAt = (tuple: Record<string, string>): TokenMap =>
+  resolveAllAt(virtualTokenGraph, tuple);
 
 const themedDecorator: Decorator = (Story, context) => {
   const globals = context.globals as SwatchbookGlobals;
@@ -349,9 +330,7 @@ const themedDecorator: Decorator = (Story, context) => {
       diagnostics,
       css,
       listing: virtualListing,
-      cells: virtualCells,
-      jointOverrides: virtualJointOverrides,
-      varianceByPath: virtualVarianceByPath,
+      tokenGraph: virtualTokenGraph,
       defaultTuple: virtualDefaultTuple,
       resolveAt: previewResolveAt,
     }),
@@ -504,9 +483,7 @@ interface HmrSnapshot {
   css: string;
   cssVarPrefix: string;
   listing: typeof virtualListing;
-  cells: typeof virtualCells;
-  jointOverrides: typeof virtualJointOverrides;
-  varianceByPath: typeof virtualVarianceByPath;
+  tokenGraph: typeof virtualTokenGraph;
   defaultTuple: typeof virtualDefaultTuple;
 }
 if (import.meta.hot) {

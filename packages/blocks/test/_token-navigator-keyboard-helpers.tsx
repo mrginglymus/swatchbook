@@ -8,23 +8,19 @@
 import { render, screen, within } from '@testing-library/react';
 import { SwatchbookProvider, TokenNavigator } from '#/index.ts';
 import type { ProjectSnapshot } from '#/index.ts';
+import { makeResolveAt } from './_snapshot-helpers.ts';
 
 export function snapshot(): ProjectSnapshot {
-  return {
+  const tokens = {
+    'color.bg': { $type: 'color', $value: { hex: '#fff' } },
+    'color.fg': { $type: 'color', $value: { hex: '#111' } },
+    'color.palette.blue.500': { $type: 'color', $value: { hex: '#3b82f6' } },
+    'radius.sm': { $type: 'dimension', $value: { value: 4, unit: 'px' } },
+  };
+  const snap: ProjectSnapshot = {
     axes: [{ name: 'theme', contexts: ['Light'], default: 'Light', source: 'synthetic' }],
     disabledAxes: [],
     presets: [],
-    cells: {
-      theme: {
-        Light: {
-          'color.bg': { $type: 'color', $value: { hex: '#fff' } },
-          'color.fg': { $type: 'color', $value: { hex: '#111' } },
-          'color.palette.blue.500': { $type: 'color', $value: { hex: '#3b82f6' } },
-          'radius.sm': { $type: 'dimension', $value: { value: 4, unit: 'px' } },
-        },
-      },
-    },
-    jointOverrides: [],
     defaultTuple: { theme: 'Light' },
     activeTheme: 'Light',
     activeAxes: { theme: 'Light' },
@@ -32,6 +28,8 @@ export function snapshot(): ProjectSnapshot {
     diagnostics: [],
     css: '',
   };
+  snap.resolveAt = makeResolveAt(tokens);
+  return snap;
 }
 
 export function renderNav(

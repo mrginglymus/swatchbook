@@ -38,7 +38,9 @@ it('surfaces a diagnostic or error when a resolver $ref target is missing', asyn
     sets: { ref: { sources: [{ $ref: './missing.json' }] } },
     resolutionOrder: [{ $ref: '#/sets/ref' }],
   });
-  await expect(loadProject({ resolver: 'resolver.json', default: {} }, workspace)).rejects.toThrow();
+  await expect(
+    loadProject({ resolver: 'resolver.json', default: {} }, workspace),
+  ).rejects.toThrow();
 });
 
 it('loads a minimal valid resolver with a single set and no modifiers', async () => {
@@ -72,12 +74,15 @@ it('loads a resolver with one modifier + two contexts (no override overlays)', a
     },
     resolutionOrder: [{ $ref: '#/sets/main' }, { $ref: '#/modifiers/mode' }],
   });
-  const project = await loadProject({ resolver: 'resolver.json', default: { mode: 'Light' } }, workspace);
+  const project = await loadProject(
+    { resolver: 'resolver.json', default: { mode: 'Light' } },
+    workspace,
+  );
   const axis = project.axes.find((a) => a.name === 'mode');
   expect(axis).toBeDefined();
   expect(axis?.contexts).toEqual(['Light', 'Dark']);
-  // Singletons: default tuple + 1 per non-default context = 2 cells on `mode`.
-  expect(Object.keys(project.cells['mode'] ?? {}).toSorted()).toEqual(['Dark', 'Light']);
+  // Graph records every context for the mode axis.
+  expect((project.tokenGraph.axisContexts['mode'] ?? []).toSorted()).toEqual(['Dark', 'Light']);
 });
 
 it('records sourceFiles for every file pulled through $ref', async () => {
@@ -165,6 +170,9 @@ it('rejects or warns when a modifier has no default and no contexts', async () =
   const diag = project.diagnostics.find(
     (d) => d.group === 'swatchbook/resolver' && d.message.includes('broken'),
   );
-  expect(diag, 'expected a swatchbook/resolver warn when Terrazzo admits the broken modifier').toBeDefined();
+  expect(
+    diag,
+    'expected a swatchbook/resolver warn when Terrazzo admits the broken modifier',
+  ).toBeDefined();
   expect(diag?.severity).toBe('warn');
 });

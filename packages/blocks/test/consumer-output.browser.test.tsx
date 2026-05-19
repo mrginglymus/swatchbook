@@ -2,22 +2,16 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ConsumerOutput, SwatchbookProvider } from '#/index.ts';
 import type { ProjectSnapshot, VirtualTokenListingShape } from '#/index.ts';
+import { makeResolveAt } from './_snapshot-helpers.ts';
 
 function makeSnapshot(
   listing?: Readonly<Record<string, VirtualTokenListingShape>>,
 ): ProjectSnapshot {
-  return {
+  const tokens = { 'color.accent.bg': { $type: 'color', $value: { hex: '#3b82f6' } } };
+  const snap: ProjectSnapshot = {
     axes: [{ name: 'theme', contexts: ['Light'], default: 'Light', source: 'synthetic' }],
     disabledAxes: [],
     presets: [],
-    cells: {
-      theme: {
-        Light: {
-          'color.accent.bg': { $type: 'color', $value: { hex: '#3b82f6' } },
-        },
-      },
-    },
-    jointOverrides: [],
     defaultTuple: { theme: 'Light' },
     activeTheme: 'Light',
     activeAxes: { theme: 'Light' },
@@ -26,6 +20,8 @@ function makeSnapshot(
     css: '',
     ...(listing !== undefined && { listing }),
   };
+  snap.resolveAt = makeResolveAt(tokens);
+  return snap;
 }
 
 describe('ConsumerOutput', () => {

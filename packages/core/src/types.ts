@@ -4,7 +4,7 @@ import type { CSSPluginOptions } from '@terrazzo/plugin-css';
 import type { TokenListingPluginOptions } from '@terrazzo/plugin-token-listing';
 import type { ChromeRole } from '#/chrome.ts';
 import type { TokenListingByPath } from '#/token-listing.ts';
-import type { TupleKey } from '#/tuple-key.ts';
+import type { TokenGraph } from '#/token-graph/types.ts';
 
 /**
  * Swatchbook's public token shape — the contract surfaced on
@@ -43,11 +43,6 @@ export type TokenMap = Record<string, SwatchbookToken>;
  * - `constant` — same value across every tuple (or token missing entirely).
  * - `single` — varies with exactly one axis.
  * - `multi` — varies across two or more axes.
- *
- * Produced by `buildVarianceByPath` at load time and stored on
- * `Project.varianceByPath` for O(1) lookup; the smart CSS emitter,
- * the MCP `get_axis_variance` tool, and the `AxisVariance` doc block
- * all read this rather than re-running the analysis per call.
  */
 export type VarianceKind = 'constant' | 'single' | 'multi';
 
@@ -67,9 +62,7 @@ export type AxisVariancePerAxis = Record<
 /**
  * Discriminated on `kind` so a `switch (result.kind)` narrows
  * `varyingAxes`'s cardinality and exposes the `axis: string` shortcut
- * on the single-axis variant. The wire shape is unchanged (the same
- * JSON the flat interface serialized to), so MCP consumers and
- * snapshot wire payloads keep working without translation.
+ * on the single-axis variant.
  */
 export type AxisVarianceResult =
   | {
@@ -95,43 +88,6 @@ export type AxisVarianceResult =
       constantAcrossAxes: readonly string[];
       perAxis: AxisVariancePerAxis;
     };
-
-/**
- * Per-axis cell maps. `cells[axisName][contextName]` is the resolved
- * `TokenMap` for `{ ...defaults, [axisName]: contextName }` — the
- * single-attribute slice of the resolver's modifier space. Size is
- * bounded by `Σ(axes × contexts)`, independent of the cartesian
- * product. Forms the primary input to `composeAt` / `resolveAt`.
- */
-export type Cells = Record<string, Record<string, TokenMap>>;
-
-/**
- * One divergent partial tuple identified by `analyzeProjectVariance`.
- * A combination of axis selections at which the resolver's resolved
- * value diverges from cascade composition over `cells` — kept around
- * so `composeAt` can patch the divergence back in.
- */
-export interface JointOverride {
-  /** axisName → contextName for the divergent combination (at any arity ≥ 2). */
-  axes: Record<string, string>;
-  /** Only the tokens whose resolved value at this tuple diverges from cascade composition. */
-  tokens: TokenMap;
-}
-
-/**
- * All joint-variant overrides for a project — an array of
- * `[canonicalKey, override]` pairs (canonical stringification of
- * `override.axes`). Iteration order is ascending arity so higher-order
- * divergences win over lower-order ones when applied in sequence.
- *
- * Shape mirrors the wire format the addon's virtual module ships to the
- * preview — no Map↔array marshaling at the boundary. No consumer needs
- * keyed lookup; all reads are `for (const [, override] of ...)`
- * iteration. Internal dedupe during construction (`probeJointOverrides`)
- * uses a temporary Map keyed on canonical tuple, materialized to this
- * array shape on return.
- */
-export type JointOverrides = readonly (readonly [TupleKey, JointOverride])[];
 
 /**
  * Compute the resolved `TokenMap` for any tuple of axis selections
@@ -343,11 +299,9 @@ export interface Diagnostic {
 }
 
 /**
- * Loaded swatchbook project. Token data lives on `cells` (per-axis
- * resolved `TokenMap`s, bounded by `Σ(axes × contexts)`) and
- * `jointOverrides` (the partial-tuple divergences cells composition
- * cannot reproduce). Read any tuple via `project.resolveAt(tuple)`;
- * read the default-tuple snapshot via `project.defaultTokens`.
+ * Loaded swatchbook project. Read any tuple via `project.resolveAt(tuple)`;
+ * read the default-tuple snapshot directly via `project.defaultTokens`.
+ * Walk the project's token resolution graph via `project.tokenGraph`.
  */
 export interface Project {
   config: Config;
@@ -373,40 +327,23 @@ export interface Project {
   /** Resolved tokens at the project's default tuple. Convenience for global views. */
   defaultTokens: TokenMap;
   /**
-   * Per-axis resolved `TokenMap`s — `cells[axisName][contextName]` is
-   * the resolved tokens for `{ ...defaultTuple, [axisName]: contextName }`.
-   * Bounded by `Σ(axes × contexts)`, independent of the cartesian
-   * product. The primary input to {@link resolveAt}.
-   */
-  cells: Cells;
-  /**
-   * Joint-variant partial-tuple overrides — token values that diverge
-   * from cascade composition over `cells` and need to be patched in
-   * by {@link resolveAt}. Probed via `analyzeProjectVariance` at all
-   * arities ≥ 2 against the cartesian truth.
-   */
-  jointOverrides: JointOverrides;
-  /**
    * The default tuple — `{ axisName: axis.default }` for every axis,
-   * after `disabledAxes` filtering. The baseline that `cells` /
-   * `resolveAt` compose against.
+   * after `disabledAxes` filtering.
    */
   defaultTuple: Record<string, string>;
   /**
    * Compose the resolved `TokenMap` for any tuple of axis selections.
-   * Pure function over `cells + jointOverrides + axes + defaultTuple`,
-   * memoized on the tuple key. Partial tuples are allowed — missing
-   * axes fall back to their defaults.
+   * Graph-backed; memoized on the canonical tuple key. Partial tuples
+   * are allowed — missing axes fall back to their defaults.
    */
   resolveAt: ResolveAt;
   /**
-   * Per-token cached `AxisVarianceResult` — pre-computed at load time
-   * so consumers (block axis-variance display, MCP `get_axis_variance`,
-   * smart-emitter Phase 2) can O(1) look up which axes affect a token
-   * instead of re-running the bucket analysis on every read. The map
-   * spans every path that appears in any permutation's resolved map.
+   * Walkable token graph — the primary resolution data structure.
+   * Consumers can query through it via the
+   * `@unpunnyfuns/swatchbook-core/graph` subpath helpers (`resolveAllAt`,
+   * `getVariance`, `listPaths`, etc.).
    */
-  varianceByPath: ReadonlyMap<string, AxisVarianceResult>;
+  tokenGraph: TokenGraph;
   /**
    * Absolute paths of every file loaded while building the project —
    * the resolver file (if any), every `$ref` target it pulled in, every

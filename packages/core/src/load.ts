@@ -1,25 +1,23 @@
-import { buildCells } from '#/cells.ts';
 import { validateChrome } from '#/chrome.ts';
 import { BufferedLogger, toDiagnostics } from '#/diagnostics.ts';
 import { validateDisabledAxes } from '#/disabled-axes.ts';
-import { probeJointOverrides } from '#/joint-overrides.ts';
 import { fillPresetTuple, validatePresets } from '#/presets.ts';
 import { validateCssOptions } from '#/terrazzo-options.ts';
 import { resolveDefaultTuple } from '#/permutations/default.ts';
 import { normalizePermutations } from '#/permutations/normalize.ts';
-import { buildResolveAt } from '#/resolve-at.ts';
 import { computeTokenListing } from '#/token-listing.ts';
-import { buildVarianceByPath } from '#/variance-by-path.ts';
+import { buildTokenGraph, buildTokenGraphFromLayered } from '#/token-graph/build.ts';
+import type { BuildTokenGraphResult } from '#/token-graph/build.ts';
+import { buildFailedDiagnostic } from '#/token-graph/diagnostics.ts';
+import { listPaths } from '#/token-graph/queries.ts';
+import { resolveAllAt } from '#/token-graph/walk.ts';
 import { permutationID } from '#/types.ts';
-import type { Axis, Config, Permutation, Project, TokenMap } from '#/types.ts';
+import type { Axis, Config, Diagnostic, Permutation, Project, TokenMap } from '#/types.ts';
 
 /**
  * Load a swatchbook project from a config. Read tokens at any axis
  * tuple via `project.resolveAt(tuple)`; read the default-tuple
- * snapshot directly via `project.defaultTokens`. The bounded
- * primitives (`cells`, `jointOverrides`, `varianceByPath`) are
- * pre-computed at load time so downstream consumers don't pay
- * resolver costs.
+ * snapshot directly via `project.defaultTokens`.
  *
  * The `cwd` defaults to `process.cwd()`. All relative paths in
  * `config` (token globs, `resolver`, layered axis overlay globs)
@@ -105,55 +103,67 @@ export async function loadProject(config: Config, cwd: string = process.cwd()): 
         )
       : { listing: {}, diagnostics: [] };
 
-  // `defaultTuple` here is the post-disabledAxes-filter version,
-  // matching what `cells` is keyed against.
+  // `defaultTuple` here is the post-disabledAxes-filter version.
   const projectDefaultTuple: Record<string, string> = {};
   for (const axis of filteredAxes) projectDefaultTuple[axis.name] = axis.default;
 
-  // `buildCells` calls `resolveTuple` once per `(axis, context)`
-  // singleton. Resolver-backed projects route through `resolver.apply`
-  // directly (no scan of the singleton-enumeration shape); layered /
-  // plain-parse projects look up the loader's per-tuple parse output
-  // by `permutationID(tuple)`. Either way the data source is
-  // upstream of `Project.permutations` / `permutationsResolved`.
-  const resolveTuple = normalized.parserInput?.resolver
-    ? (tuple: Readonly<Record<string, string>>): TokenMap =>
-        normalized.parserInput!.resolver!.apply(tuple as Record<string, string>)
-    : (tuple: Readonly<Record<string, string>>): TokenMap =>
-        filteredResolved[permutationID(tuple)] ?? {};
-  const cells = buildCells(filteredAxes, resolveTuple, projectDefaultTuple);
+  // Build the token graph. Resolver-backed projects build from the live
+  // Resolver; layered / plain-parse projects infer writes by diffing
+  // per-singleton resolved maps.
+  let tokenGraphResult: BuildTokenGraphResult;
+  try {
+    if (normalized.parserInput?.resolver) {
+      tokenGraphResult = buildTokenGraph(normalized.parserInput, filteredAxes, projectDefaultTuple);
+    } else {
+      const baselineFromLayered =
+        filteredResolved[permutationID(projectDefaultTuple)] ??
+        filteredResolved[Object.values(filteredPermutations)[0]?.name ?? ''] ??
+        {};
+      tokenGraphResult = buildTokenGraphFromLayered(
+        filteredAxes,
+        baselineFromLayered,
+        filteredResolved,
+        projectDefaultTuple,
+      );
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    tokenGraphResult = {
+      graph: {
+        nodes: {},
+        axes: filteredAxes.map((a) => a.name),
+        axisDefaults: projectDefaultTuple,
+        axisContexts: Object.fromEntries(filteredAxes.map((a) => [a.name, a.contexts])),
+      },
+      diagnostics: [buildFailedDiagnostic(detail)] as readonly Diagnostic[],
+    };
+  }
 
-  // Pair-only joint-divergence probe via `resolver.apply` — bounded
-  // by `Σ pairs (contexts_a - 1) × (contexts_b - 1)` calls,
-  // independent of the cartesian product size. Returns two derived
-  // signals: `overrides` for resolveAt correctness, `jointTouching`
-  // for variance display (axes that genuinely contribute to a joint
-  // divergence on a path, separated from cell-composition artifacts).
-  const { overrides: jointOverrides, jointTouching } = probeJointOverrides(
-    filteredAxes,
-    cells,
-    projectDefaultTuple,
-    normalized.parserInput?.resolver,
-  );
-  const resolveAt = buildResolveAt(filteredAxes, cells, jointOverrides, projectDefaultTuple);
+  // resolveAt: graph-backed for all projects. Fills in axis defaults (so
+  // partial tuples canonicalize to the same key as a fully-specified
+  // equivalent) and memoizes by canonical key so repeated calls with the
+  // same effective tuple return the same instance.
+  const resolveAt = (() => {
+    const memo = new Map<string, TokenMap>();
+    return (tuple: Record<string, string>): TokenMap => {
+      const full: Record<string, string> = { ...projectDefaultTuple };
+      for (const axis of filteredAxes) {
+        const val = tuple[axis.name];
+        if (val !== undefined) full[axis.name] = val;
+      }
+      const key = filteredAxes.map((a) => `${a.name}=${full[a.name]}`).join('|');
+      const cached = memo.get(key);
+      if (cached) return cached;
+      const result = resolveAllAt(tokenGraphResult.graph, full);
+      memo.set(key, result);
+      return result;
+    };
+  })();
 
-  // Pre-compute per-path variance from cells + jointOverrides — the
-  // bounded surface, no cartesian dependency.
-  const baselineForVariance = filteredAxes[0]
-    ? (cells[filteredAxes[0].name]?.[filteredAxes[0].default] ?? {})
-    : defaultTokens;
-  const varianceByPath = buildVarianceByPath(
-    filteredAxes,
-    cells,
-    jointTouching,
-    baselineForVariance,
-  );
-
-  // `validateChrome` checks targets against the project's path
-  // universe. `varianceByPath.keys()` is the union of every path
-  // that appears in any theme by construction — same set the prior
-  // `permutationsResolved`-scan produced, computed once at load time.
-  const tokenIDs = new Set<string>(varianceByPath.keys());
+  // `validateChrome` checks targets against the project's path universe.
+  // `listPaths` returns every path present in the graph — same set the
+  // prior `permutationsResolved`-scan produced.
+  const tokenIDs = new Set<string>(listPaths(tokenGraphResult.graph));
   const { entries: chrome, diagnostics: chromeDiagnostics } = validateChrome(
     config.chrome,
     tokenIDs,
@@ -166,11 +176,9 @@ export async function loadProject(config: Config, cwd: string = process.cwd()): 
     presets,
     chrome,
     defaultTokens,
-    cells,
-    jointOverrides,
     defaultTuple: projectDefaultTuple,
     resolveAt,
-    varianceByPath,
+    tokenGraph: tokenGraphResult.graph,
     sourceFiles: normalized.sourceFiles,
     cwd,
     listing,
@@ -183,6 +191,7 @@ export async function loadProject(config: Config, cwd: string = process.cwd()): 
       ...chromeDiagnostics,
       ...cssOptionsDiagnostics,
       ...listingDiagnostics,
+      ...tokenGraphResult.diagnostics,
     ],
   };
 }
@@ -213,10 +222,21 @@ function applyDisabledAxes(
     }
     return true;
   });
-  const surviving = new Set(filteredPermutations.map((p) => p.name));
-  const filteredResolved: Record<string, TokenMap> = {};
-  for (const [name, tokens] of Object.entries(resolved)) {
-    if (surviving.has(name)) filteredResolved[name] = tokens;
+  const canonicalised: Record<string, TokenMap> = {};
+  for (const perm of filteredPermutations) {
+    const tokens = resolved[perm.name];
+    if (!tokens) continue;
+    const filteredTuple: Record<string, string> = {};
+    for (const axis of filteredAxes)
+      filteredTuple[axis.name] = perm.input[axis.name] ?? axis.default;
+    canonicalised[permutationID(filteredTuple)] = tokens;
   }
-  return { axes: filteredAxes, permutations: filteredPermutations, resolved: filteredResolved };
+  // Re-key permutation names to match the canonicalised (filtered-axes-only) key shape.
+  const rekeyed = filteredPermutations.map((perm) => {
+    const filteredTuple: Record<string, string> = {};
+    for (const axis of filteredAxes)
+      filteredTuple[axis.name] = perm.input[axis.name] ?? axis.default;
+    return { ...perm, name: permutationID(filteredTuple) };
+  });
+  return { axes: filteredAxes, permutations: rekeyed, resolved: canonicalised };
 }
